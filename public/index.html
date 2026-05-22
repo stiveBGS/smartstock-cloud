@@ -74,7 +74,7 @@
       </div>
       <div class="topbar-right">
         <div class="sync-badge sync-ok" id="sync-st"><span class="dot"></span> Connecté</div>
-        <button class="topbar-btn" onclick="syncNow()" title="Synchroniser">🔄</button>
+        <button class="topbar-btn" onclick="syncNow().then(function(){toast('Données synchronisées ✓','success');})" title="Synchroniser">🔄</button>
         <button class="topbar-btn" onclick="toggleDarkMode()" title="Mode sombre" id="dm-btn">🌙</button>
       </div>
     </div>
@@ -614,20 +614,73 @@ function setSyncSt(s){
 async function syncNow(){
   if(!currentUser||!currentUser.magasinId)return;
   setSyncSt('loading');
-  try{await api('POST','/api/magasin/data',DB);setSyncSt('ok');toast('Données synchronisées','success');}
-  catch(e){setSyncSt('err');toast('Sync échouée: '+e.message,'error');}
+  try{
+    await api('POST','/api/magasin/data',DB);
+    setSyncSt('ok');
+    // Mettre à jour le timestamp de dernière sync
+    localStorage.setItem('ss_last_sync',new Date().toISOString());
+  }catch(e){
+    setSyncSt('err');
+    // Garder en cache local si hors ligne
+    localStorage.setItem('ss_offline_cache',JSON.stringify(DB));
+    toast('Hors ligne — données sauvegardées localement','warning');
+  }
 }
 
+// Sauvegarde IMMEDIATE sur le serveur (plus de délai)
 function scheduleSave(){
+  // Annuler l'ancien timer
   if(syncTimer2)clearTimeout(syncTimer2);
-  syncTimer2=setTimeout(function(){syncNow();},3000);
+  // Sauvegarder après 800ms (quasi immédiat)
+  syncTimer2=setTimeout(function(){syncNow();},800);
 }
 
+// Charger les données depuis le serveur (priorité serveur)
 async function loadData(){
   if(!currentUser||!currentUser.magasinId)return;
   setSyncSt('loading');
-  try{var d=await api('GET','/api/magasin/data');DB=d;setSyncSt('ok');initUI();}
-  catch(e){setSyncSt('err');toast('Impossible de charger les données','error');}
+  try{
+    // Toujours charger depuis le serveur en priorité
+    var d=await api('GET','/api/magasin/data');
+    DB=d;
+    setSyncSt('ok');
+    initUI();
+    // Vider le cache offline puisqu'on est connecté
+    localStorage.removeItem('ss_offline_cache');
+  }catch(e){
+    setSyncSt('err');
+    // Essayer le cache local si hors ligne
+    var cache=localStorage.getItem('ss_offline_cache');
+    if(cache){
+      try{
+        DB=JSON.parse(cache);
+        initUI();
+        toast('Mode hors ligne — dernières données locales chargées','warning');
+      }catch(ex){}
+    } else {
+      toast('Impossible de charger les données. Vérifiez votre connexion.','error');
+    }
+  }
+}
+
+// Sync automatique toutes les 30 secondes (pour garder téléphone à jour)
+function startAutoRefresh(){
+  setInterval(async function(){
+    if(currentUser&&currentUser.magasinId){
+      try{
+        var d=await api('GET','/api/magasin/data');
+        var ancienTotal=DB.ventes.length;
+        DB=d;
+        setSyncSt('ok');
+        // Rafraîchir l'UI silencieusement si nouvelles données
+        if(d.ventes.length!==ancienTotal){
+          updateDash();
+          renderStocks('',sfx);
+          renderClients('');
+        }
+      }catch(e){setSyncSt('err');}
+    }
+  },30000);
 }
 
 // ===== LOGIN (SÉCURISÉ) =====
@@ -728,6 +781,7 @@ function setupUI(){
       (isAdmin?'<div class="nav-section">Système</div>'+mkNavItem('params','⚙️','Paramètres'):'');
     document.querySelector('[data-page="dashboard"]').classList.add('active');
     loadData();
+    startAutoRefresh();
   }
   buildBN();
   initBkSystem();
